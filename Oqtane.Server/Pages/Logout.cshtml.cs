@@ -11,6 +11,7 @@ using Oqtane.Shared;
 namespace Oqtane.Pages
 {
     [Authorize]
+    [IgnoreAntiforgeryToken]
     public class LogoutModel : PageModel
     {
         private readonly IUserManager _userManager;
@@ -22,7 +23,7 @@ namespace Oqtane.Pages
             _syncManager = syncManager;
         }
 
-        public async Task<IActionResult> OnPostAsync(string returnurl)
+        public async Task<IActionResult> OnPostAsync(string returnurl, string everywhere)
         {
             if (HttpContext.User != null)
             {
@@ -30,7 +31,11 @@ namespace Oqtane.Pages
                 var user = _userManager.GetUser(HttpContext.User.Identity.Name, alias.SiteId);
                 if (user != null)
                 {
-                    _syncManager.AddSyncEvent(alias.TenantId, EntityNames.User, user.UserId, SyncEventActions.Reload);
+                    if (everywhere == "true")
+                    {
+                        await _userManager.LogoutUserEverywhere(user);
+                    }
+                    _syncManager.AddSyncEvent(alias, EntityNames.User, user.UserId, SyncEventActions.Reload);
                 }
 
                 await HttpContext.SignOutAsync(Constants.AuthenticationScheme);

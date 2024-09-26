@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-using [Owner].Module.[Module].Models;
+using System.Threading.Tasks;
 
 namespace [Owner].Module.[Module].Repository
 {

@@ -137,16 +137,20 @@ namespace Oqtane.Infrastructure
                                     // register assembly
                                     if (Path.GetExtension(filename) == ".dll")
                                     {
-                                        // if package version was not installed previously
-                                        if (!File.Exists(Path.Combine(sourceFolder, name + ".log")))
+                                        // do not register licensing assemblies
+                                        if (!Path.GetFileName(filename).StartsWith("Oqtane.Licensing."))
                                         {
-                                            if (assemblies.ContainsKey(Path.GetFileName(filename)))
+                                            // if package version was not installed previously
+                                            if (!File.Exists(Path.Combine(sourceFolder, name + ".log")))
                                             {
-                                                assemblies[Path.GetFileName(filename)] += 1;
-                                            }
-                                            else
-                                            {
-                                                assemblies.Add(Path.GetFileName(filename), 1);
+                                                if (assemblies.ContainsKey(Path.GetFileName(filename)))
+                                                {
+                                                    assemblies[Path.GetFileName(filename)] += 1;
+                                                }
+                                                else
+                                                {
+                                                    assemblies.Add(Path.GetFileName(filename), 1);
+                                                }
                                             }
                                         }
                                     }
@@ -193,6 +197,12 @@ namespace Oqtane.Infrastructure
             string[] segments = entry.FullName.Split('/'); // ZipArchiveEntries always use unix path separator
             string filename = Path.Combine(folder, string.Join(Path.DirectorySeparatorChar, segments, ignoreLeadingSegments, segments.Length - ignoreLeadingSegments));
 
+            // validate path to prevent path traversal
+            if (!Path.GetFullPath(filename).StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                return "";
+            }
+
             try
             {
                 if (!Directory.Exists(Path.GetDirectoryName(filename)))
@@ -223,6 +233,7 @@ namespace Oqtane.Infrastructure
                 // an error occurred extracting the file
                 filename = "";
             }
+
             return filename;
         }
 
@@ -255,22 +266,26 @@ namespace Oqtane.Infrastructure
                         // delete assets
                         if (Path.GetExtension(filepath) == ".dll")
                         {
-                            // use assembly log to determine if assembly is used in other packages
-                            if (assemblies.ContainsKey(Path.GetFileName(filepath)))
+                            // do not remove licensing assemblies
+                            if (!Path.GetFileName(filepath).StartsWith("Oqtane.Licensing."))
                             {
-                                if (assemblies[Path.GetFileName(filepath)] == 1)
+                                // use assembly log to determine if assembly is used in other packages
+                                if (assemblies.ContainsKey(Path.GetFileName(filepath)))
+                                {
+                                    if (assemblies[Path.GetFileName(filepath)] == 1)
+                                    {
+                                        DeleteFile(filepath);
+                                        assemblies.Remove(Path.GetFileName(filepath));
+                                    }
+                                    else
+                                    {
+                                        assemblies[Path.GetFileName(filepath)] -= 1;
+                                    }
+                                }
+                                else // does not exist in assembly log
                                 {
                                     DeleteFile(filepath);
-                                    assemblies.Remove(Path.GetFileName(filepath));
                                 }
-                                else
-                                {
-                                    assemblies[Path.GetFileName(filepath)] -= 1;
-                                }
-                            }
-                            else // does not exist in assembly log
-                            {
-                                DeleteFile(filepath);
                             }
                         }
                         else // not an assembly

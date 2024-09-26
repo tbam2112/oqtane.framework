@@ -34,6 +34,7 @@ namespace Oqtane.Controllers
                 case "environment":
                     systeminfo.Add("CLRVersion", Environment.Version.ToString());
                     systeminfo.Add("OSVersion", Environment.OSVersion.ToString());
+                    systeminfo.Add("Process", (Environment.Is64BitProcess) ? "64 Bit" : "32 Bit");
                     systeminfo.Add("MachineName", Environment.MachineName);
                     systeminfo.Add("WorkingSet", Environment.WorkingSet.ToString());
                     systeminfo.Add("TickCount", Environment.TickCount64.ToString());
@@ -46,8 +47,8 @@ namespace Oqtane.Controllers
                     break;
                 case "configuration":
                     systeminfo.Add("InstallationId", _configManager.GetInstallationId());
-                    systeminfo.Add("Runtime", _configManager.GetSetting("Runtime", "Server"));
-                    systeminfo.Add("RenderMode", _configManager.GetSetting("RenderMode", "ServerPrerendered"));
+                    systeminfo.Add("RenderMode", _configManager.GetSetting("RenderMode", RenderModes.Interactive));
+                    systeminfo.Add("Runtime", _configManager.GetSetting("Runtime", Runtimes.Server));
                     systeminfo.Add("DetailedErrors", _configManager.GetSetting("DetailedErrors", "false"));
                     systeminfo.Add("Logging:LogLevel:Default", _configManager.GetSetting("Logging:LogLevel:Default", "Information"));
                     systeminfo.Add("Logging:LogLevel:Notify", _configManager.GetSetting("Logging:LogLevel:Notify", "Error"));

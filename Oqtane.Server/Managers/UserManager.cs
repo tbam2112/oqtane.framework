@@ -6,6 +6,8 @@ using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Localization;
 using Oqtane.Enums;
 using Oqtane.Infrastructure;
 using Oqtane.Models;
@@ -24,13 +26,15 @@ namespace Oqtane.Managers
         private readonly ITenantManager _tenantManager;
         private readonly INotificationRepository _notifications;
         private readonly IFolderRepository _folders;
-        private readonly IFileRepository _files;
         private readonly IProfileRepository _profiles;
         private readonly ISettingRepository _settings;
+        private readonly ISiteRepository _sites;
         private readonly ISyncManager _syncManager;
         private readonly ILogManager _logger;
+        private readonly IMemoryCache _cache;
+        private readonly IStringLocalizer<UserManager> _localizer;
 
-        public UserManager(IUserRepository users, IRoleRepository roles, IUserRoleRepository userRoles, UserManager<IdentityUser> identityUserManager, SignInManager<IdentityUser> identitySignInManager, ITenantManager tenantManager, INotificationRepository notifications, IFolderRepository folders, IFileRepository files, IProfileRepository profiles, ISettingRepository settings, ISyncManager syncManager, ILogManager logger)
+        public UserManager(IUserRepository users, IRoleRepository roles, IUserRoleRepository userRoles, UserManager<IdentityUser> identityUserManager, SignInManager<IdentityUser> identitySignInManager, ITenantManager tenantManager, INotificationRepository notifications, IFolderRepository folders, IProfileRepository profiles, ISettingRepository settings, ISiteRepository sites, ISyncManager syncManager, ILogManager logger, IMemoryCache cache, IStringLocalizer<UserManager> localizer)
         {
             _users = users;
             _roles = roles;
@@ -40,27 +44,42 @@ namespace Oqtane.Managers
             _tenantManager = tenantManager;
             _notifications = notifications;
             _folders = folders;
-            _files = files;
             _profiles = profiles;
             _settings = settings;
+            _sites = sites;
             _syncManager = syncManager;
             _logger = logger;
+            _cache = cache;
+            _localizer = localizer;
         }
 
         public User GetUser(int userid, int siteid)
         {
-            User user = _users.GetUser(userid);
-            if (user != null)
+            var alias = _tenantManager.GetAlias();
+            return _cache.GetOrCreate($"user:{userid}:{alias.SiteKey}", entry =>
             {
-                user.SiteId = siteid;
-                user.Roles = GetUserRoles(user.UserId, user.SiteId);
-            }
-            return user;
+                entry.SlidingExpiration = TimeSpan.FromMinutes(30);
+                User user = _users.GetUser(userid);
+                if (user != null)
+                {
+                    user.SiteId = siteid;
+                    user.Roles = GetUserRoles(user.UserId, user.SiteId);
+                    user.SecurityStamp = _identityUserManager.FindByNameAsync(user.Username).GetAwaiter().GetResult()?.SecurityStamp;
+                    user.Settings = _settings.GetSettings(EntityNames.User, user.UserId)
+                        .ToDictionary(setting => setting.SettingName, setting => setting.SettingValue);
+                }
+                return user;
+            });
         }
 
         public User GetUser(string username, int siteid)
         {
-            return GetUser(username, "", siteid);
+            User user = _users.GetUser(username);
+            if (user != null)
+            {
+                user = GetUser(user.UserId, siteid);
+            }
+            return user;
         }
 
         public User GetUser(string username, string email, int siteid)
@@ -68,8 +87,7 @@ namespace Oqtane.Managers
             User user = _users.GetUser(username, email);
             if (user != null)
             {
-                user.SiteId = siteid;
-                user.Roles = GetUserRoles(user.UserId, user.SiteId);
+                user = GetUser(user.UserId, siteid);
             }
             return user;
         }
@@ -80,14 +98,17 @@ namespace Oqtane.Managers
             List<UserRole> userroles = _userRoles.GetUserRoles(userId, siteId).ToList();
             foreach (UserRole userrole in userroles)
             {
-                roles += userrole.Role.Name + ";";
-                if (userrole.Role.Name == RoleNames.Host && !userroles.Any(item => item.Role.Name == RoleNames.Admin))
+                if (Utilities.IsEffectiveAndNotExpired(userrole.EffectiveDate, userrole.ExpiryDate))
                 {
-                    roles += RoleNames.Admin + ";";
-                }
-                if (userrole.Role.Name == RoleNames.Host && !userroles.Any(item => item.Role.Name == RoleNames.Registered))
-                {
-                    roles += RoleNames.Registered + ";";
+                    roles += userrole.Role.Name + ";";
+                    if (userrole.Role.Name == RoleNames.Host && !userroles.Any(item => item.Role.Name == RoleNames.Admin))
+                    {
+                        roles += RoleNames.Admin + ";";
+                    }
+                    if (userrole.Role.Name == RoleNames.Host && !userroles.Any(item => item.Role.Name == RoleNames.Registered))
+                    {
+                        roles += RoleNames.Registered + ";";
+                    }
                 }
             }
             if (roles != "") roles = ";" + roles;
@@ -124,13 +145,17 @@ namespace Oqtane.Managers
             }
             else
             {
-                var result = await _identitySignInManager.CheckPasswordSignInAsync(identityuser, user.Password, false);
-                succeeded = result.Succeeded;
-                if (!succeeded)
+                succeeded = true;
+                if (!user.IsAuthenticated)
                 {
-                    errors = "Password Not Valid For User";
+                    var result = await _identitySignInManager.CheckPasswordSignInAsync(identityuser, user.Password, false);
+                    succeeded = result.Succeeded;
+                    if (!succeeded)
+                    {
+                        errors = "Password Not Valid For User";
+                    }
+                    user.EmailConfirmed = succeeded;
                 }
-                user.EmailConfirmed = succeeded;
             }
 
             if (succeeded)
@@ -139,7 +164,7 @@ namespace Oqtane.Managers
                 user.LastLoginOn = null;
                 user.LastIPAddress = "";
                 User = _users.AddUser(user);
-                _syncManager.AddSyncEvent(alias.TenantId, EntityNames.User, User.UserId, SyncEventActions.Create);
+                _syncManager.AddSyncEvent(alias, EntityNames.User, User.UserId, SyncEventActions.Create);
             }
             else
             {
@@ -148,21 +173,33 @@ namespace Oqtane.Managers
 
             if (User != null)
             {
+                string siteName = _sites.GetSite(user.SiteId).Name;
                 if (!user.EmailConfirmed)
                 {
                     string token = await _identityUserManager.GenerateEmailConfirmationTokenAsync(identityuser);
                     string url = alias.Protocol + alias.Name + "/login?name=" + user.Username + "&token=" + WebUtility.UrlEncode(token);
-                    string body = "Dear " + user.DisplayName + ",\n\nIn Order To Verify The Email Address Associated To Your User Account Please Click The Link Displayed Below:\n\n" + url + "\n\nThank You!";
-                    var notification = new Notification(user.SiteId, User, "User Account Verification", body);
+                    string subject = _localizer["VerificationEmailSubject"];
+                    subject = subject.Replace("[SiteName]", siteName);
+                    string body = _localizer["VerificationEmailBody"].Value;
+                    body = body.Replace("[UserDisplayName]", user.DisplayName);
+                    body = body.Replace("[URL]", url);
+                    body = body.Replace("[SiteName]", siteName);
+                    var notification = new Notification(alias.SiteId, User, subject, body);
                     _notifications.AddNotification(notification);
                 }
                 else
                 {
                     if (!user.SuppressNotification)
                     {
-                        string url = alias.Protocol + alias.Name;
-                        string body = "Dear " + user.DisplayName + ",\n\nA User Account Has Been Successfully Created For You With The Username " + user.Username + ". Please Visit " + url + " And Use The Login Option To Sign In. If You Do Not Know Your Password, Use The Forgot Password Option On The Login Page To Reset Your Account.\n\nThank You!";
-                        var notification = new Notification(user.SiteId, User, "User Account Notification", body);
+                        string url = alias.Protocol + alias.Name + "/login";
+                        string subject = _localizer["NoVerificationEmailSubject"];
+                        subject = subject.Replace("[SiteName]", siteName);
+                        string body = _localizer["NoVerificationEmailBody"].Value;
+                        body = body.Replace("[UserDisplayName]", user.DisplayName);
+                        body = body.Replace("[URL]", url);
+                        body = body.Replace("[SiteName]", siteName);
+                        body = body.Replace("[Username]", user.Username);
+                        var notification = new Notification(alias.SiteId, User, subject, body);
                         _notifications.AddNotification(notification);
                     }
                 }
@@ -184,56 +221,57 @@ namespace Oqtane.Managers
             IdentityUser identityuser = await _identityUserManager.FindByNameAsync(user.Username);
             if (identityuser != null)
             {
-                var valid = true;
+                var alias = _tenantManager.GetAlias();
+
                 if (!string.IsNullOrEmpty(user.Password))
                 {
                     var validator = new PasswordValidator<IdentityUser>();
                     var result = await validator.ValidateAsync(_identityUserManager, null, user.Password);
-                    valid = result.Succeeded;
-                    if (valid)
+                    if (result.Succeeded)
                     {
                         identityuser.PasswordHash = _identityUserManager.PasswordHasher.HashPassword(identityuser, user.Password);
+                        await _identityUserManager.UpdateAsync(identityuser);
+                        await _identityUserManager.UpdateSecurityStampAsync(identityuser); // will force user to sign in again
                     }
-                }
-                if (valid)
-                {
-                    if (!string.IsNullOrEmpty(user.Password))
+                    else
                     {
-                        await _identityUserManager.UpdateAsync(identityuser); // requires password to be provided
+                        _logger.Log(user.SiteId, LogLevel.Error, this, LogFunction.Update, "Unable To Update User {Username}. Password Does Not Meet Complexity Requirements.", user.Username);
+                        return null;
                     }
-
-                    if (user.Email != identityuser.Email)
-                    {
-                        await _identityUserManager.SetEmailAsync(identityuser, user.Email);
-
-                        // if email address changed and user is not administrator, email verification is required for new email address
-                        if (!user.EmailConfirmed)
-                        {
-                            var alias = _tenantManager.GetAlias();
-                            string token = await _identityUserManager.GenerateEmailConfirmationTokenAsync(identityuser);
-                            string url = alias.Protocol + alias.Name + "/login?name=" + user.Username + "&token=" + WebUtility.UrlEncode(token);
-                            string body = "Dear " + user.DisplayName + ",\n\nIn Order To Verify The Email Address Associated To Your User Account Please Click The Link Displayed Below:\n\n" + url + "\n\nThank You!";
-                            var notification = new Notification(user.SiteId, user, "User Account Verification", body);
-                            _notifications.AddNotification(notification);
-                        }
-                        else
-                        {
-                            var emailConfirmationToken = await _identityUserManager.GenerateEmailConfirmationTokenAsync(identityuser);
-                            await _identityUserManager.ConfirmEmailAsync(identityuser, emailConfirmationToken);
-                        }
-                    }
-
-                    user = _users.UpdateUser(user);
-                    _syncManager.AddSyncEvent(_tenantManager.GetAlias().TenantId, EntityNames.User, user.UserId, SyncEventActions.Update);
-                    _syncManager.AddSyncEvent(_tenantManager.GetAlias().TenantId, EntityNames.User, user.UserId, SyncEventActions.Reload);
-                    user.Password = ""; // remove sensitive information
-                    _logger.Log(LogLevel.Information, this, LogFunction.Update, "User Updated {User}", user);
                 }
-                else
+
+                if (user.Email != identityuser.Email)
                 {
-                    _logger.Log(user.SiteId, LogLevel.Error, this, LogFunction.Update, "Unable To Update User {Username}. Password Does Not Meet Complexity Requirements.", user.Username);
-                    user = null;
+                    identityuser.Email = user.Email;
+                    await _identityUserManager.UpdateAsync(identityuser); // security stamp not updated
+
+                    // if email address changed and it is not confirmed, verification is required for new email address
+                    if (!user.EmailConfirmed)
+                    {
+                        string token = await _identityUserManager.GenerateEmailConfirmationTokenAsync(identityuser);
+                        string url = alias.Protocol + alias.Name + "/login?name=" + user.Username + "&token=" + WebUtility.UrlEncode(token);
+                        string body = "Dear " + user.DisplayName + ",\n\nIn Order To Verify The Email Address Associated To Your User Account Please Click The Link Displayed Below:\n\n" + url + "\n\nThank You!";
+                        var notification = new Notification(user.SiteId, user, "User Account Verification", body);
+                        _notifications.AddNotification(notification);
+                    }
                 }
+
+                if (user.EmailConfirmed)
+                {
+                    var emailConfirmationToken = await _identityUserManager.GenerateEmailConfirmationTokenAsync(identityuser);
+                    await _identityUserManager.ConfirmEmailAsync(identityuser, emailConfirmationToken);
+                }
+
+                user = _users.UpdateUser(user);
+                _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, user.UserId, SyncEventActions.Update);
+                _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, user.UserId, SyncEventActions.Reload);
+                user.Password = ""; // remove sensitive information
+                _logger.Log(LogLevel.Information, this, LogFunction.Update, "User Updated {User}", user);
+            }
+            else
+            {
+                _logger.Log(user.SiteId, LogLevel.Error, this, LogFunction.Update, "Unable To Update User {Username}. User Does Not Exist.", user.Username);
+                user = null;
             }
 
             return user;
@@ -274,8 +312,8 @@ namespace Oqtane.Managers
                     {
                         // delete user
                         _users.DeleteUser(userid);
-                        _syncManager.AddSyncEvent(_tenantManager.GetAlias().TenantId, EntityNames.User, userid, SyncEventActions.Delete);
-                        _syncManager.AddSyncEvent(_tenantManager.GetAlias().TenantId, EntityNames.User, userid, SyncEventActions.Reload);
+                        _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, userid, SyncEventActions.Delete);
+                        _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, userid, SyncEventActions.Reload);
                         _logger.Log(LogLevel.Information, this, LogFunction.Delete, "User Deleted {UserId}", userid, result.ToString());
                     }
                     else
@@ -307,11 +345,17 @@ namespace Oqtane.Managers
                             user.TwoFactorCode = token;
                             user.TwoFactorExpiry = DateTime.UtcNow.AddMinutes(10);
                             _users.UpdateUser(user);
-
-                            string body = "Dear " + user.DisplayName + ",\n\nYou requested a secure verification code to log in to your account. Please enter the secure verification code on the site:\n\n" + token +
-                                "\n\nPlease note that the code is only valid for 10 minutes so if you are unable to take action within that time period, you should initiate a new login on the site." +
-                                "\n\nThank You!";
-                            var notification = new Notification(user.SiteId, user, "User Verification Code", body);
+                            var alias = _tenantManager.GetAlias();
+                            string url = alias.Protocol + alias.Name;
+                            string siteName = _sites.GetSite(alias.SiteId).Name;
+                            string subject = _localizer["TwoFactorEmailSubject"];
+                            subject = subject.Replace("[SiteName]", siteName);
+                            string body = _localizer["TwoFactorEmailBody"].Value;
+                            body = body.Replace("[UserDisplayName]", user.DisplayName);
+                            body = body.Replace("[URL]", url);
+                            body = body.Replace("[SiteName]", siteName);
+                            body = body.Replace("[Token]", token);
+                            var notification = new Notification(alias.SiteId, user, subject, body);
                             _notifications.AddNotification(notification);
 
                             _logger.Log(LogLevel.Information, this, LogFunction.Security, "User Verification Notification Sent For {Username}", user.Username);
@@ -328,7 +372,7 @@ namespace Oqtane.Managers
                                     user.LastLoginOn = DateTime.UtcNow;
                                     user.LastIPAddress = LastIPAddress;
                                     _users.UpdateUser(user);
-                                    _logger.Log(LogLevel.Information, this, LogFunction.Security, "User Login Successful {Username}", user.Username);
+                                    _logger.Log(LogLevel.Information, this, LogFunction.Security, "User Login Successful For {Username} From IP Address {IPAddress}", user.Username, LastIPAddress);
 
                                     if (setCookie)
                                     {
@@ -355,10 +399,14 @@ namespace Oqtane.Managers
                         user = _users.GetUser(user.Username);
                         string token = await _identityUserManager.GeneratePasswordResetTokenAsync(identityuser);
                         string url = alias.Protocol + alias.Name + "/reset?name=" + user.Username + "&token=" + WebUtility.UrlEncode(token);
-                        string body = "Dear " + user.DisplayName + ",\n\nYou attempted multiple times unsuccessfully to log in to your account and it is now locked out. Please wait a few minutes and then try again... or use the link below to reset your password:\n\n" + url +
-                            "\n\nPlease note that the link is only valid for 24 hours so if you are unable to take action within that time period, you should initiate another password reset on the site." +
-                            "\n\nThank You!";
-                        var notification = new Notification(user.SiteId, user, "User Lockout", body);
+                        string siteName = _sites.GetSite(alias.SiteId).Name;
+                        string subject = _localizer["UserLockoutEmailSubject"];
+                        subject = subject.Replace("[SiteName]", siteName);
+                        string body = _localizer["UserLockoutEmailBody"].Value;
+                        body = body.Replace("[UserDisplayName]", user.DisplayName);
+                        body = body.Replace("[URL]", url);
+                        body = body.Replace("[SiteName]", siteName);
+                        var notification = new Notification(alias.SiteId, user, subject, body);
                         _notifications.AddNotification(notification);
                         _logger.Log(LogLevel.Information, this, LogFunction.Security, "User Lockout Notification Sent For {Username}", user.Username);
                     }
@@ -370,6 +418,16 @@ namespace Oqtane.Managers
             }
 
             return user;
+        }
+        public async Task LogoutUserEverywhere(User user)
+        {
+            var identityuser = await _identityUserManager.FindByNameAsync(user.Username);
+            if (identityuser != null)
+            {
+                await _identityUserManager.UpdateSecurityStampAsync(identityuser);
+                _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, user.UserId, SyncEventActions.Update);
+                _syncManager.AddSyncEvent(_tenantManager.GetAlias(), EntityNames.User, user.UserId, SyncEventActions.Reload);
+            }
         }
 
         public async Task<User> VerifyEmail(User user, string token)
@@ -404,12 +462,14 @@ namespace Oqtane.Managers
                 user = _users.GetUser(user.Username);
                 string token = await _identityUserManager.GeneratePasswordResetTokenAsync(identityuser);
                 string url = alias.Protocol + alias.Name + "/reset?name=" + user.Username + "&token=" + WebUtility.UrlEncode(token);
-                string body = "Dear " + user.DisplayName + ",\n\nYou recently requested to reset your password. Please use the link below to complete the process:\n\n" + url +
-                    "\n\nPlease note that the link is only valid for 24 hours so if you are unable to take action within that time period, you should initiate another password reset on the site." +
-                    "\n\nIf you did not request to reset your password you can safely ignore this message." +
-                    "\n\nThank You!";
-
-                var notification = new Notification(_tenantManager.GetAlias().SiteId, user, "User Password Reset", body);
+                string siteName = _sites.GetSite(alias.SiteId).Name;
+                string subject = _localizer["ForgotPasswordEmailSubject"];
+                subject = subject.Replace("[SiteName]", siteName);
+                string body = _localizer["ForgotPasswordEmailBody"].Value;
+                body = body.Replace("[UserDisplayName]", user.DisplayName);
+                body = body.Replace("[URL]", url);
+                body = body.Replace("[SiteName]", siteName);
+                var notification = new Notification(_tenantManager.GetAlias().SiteId, user, subject, body);
                 _notifications.AddNotification(notification);
                 _logger.Log(LogLevel.Information, this, LogFunction.Security, "Password Reset Notification Sent For {Username}", user.Username);
             }
@@ -424,6 +484,7 @@ namespace Oqtane.Managers
             IdentityUser identityuser = await _identityUserManager.FindByNameAsync(user.Username);
             if (identityuser != null && !string.IsNullOrEmpty(token))
             {
+                // note that ResetPasswordAsync checks password complexity rules
                 var result = await _identityUserManager.ResetPasswordAsync(identityuser, token, user.Password);
                 if (result.Succeeded)
                 {

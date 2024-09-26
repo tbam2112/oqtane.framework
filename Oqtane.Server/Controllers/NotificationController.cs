@@ -8,10 +8,6 @@ using Oqtane.Infrastructure;
 using Oqtane.Repository;
 using Oqtane.Security;
 using System.Net;
-using System.Reflection.Metadata;
-using Microsoft.Extensions.Localization;
-using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using System.Linq;
 
 namespace Oqtane.Controllers
 {
@@ -168,7 +164,7 @@ namespace Oqtane.Controllers
                     notification.Body = WebUtility.HtmlEncode(notification.Body);
                 }
                 notification = _notifications.AddNotification(notification);
-                _syncManager.AddSyncEvent(_alias.TenantId, EntityNames.Notification, notification.NotificationId, SyncEventActions.Create);
+                _syncManager.AddSyncEvent(_alias, EntityNames.Notification, notification.NotificationId, SyncEventActions.Create);
                 _logger.Log(LogLevel.Information, this, LogFunction.Create, "Notification Added {NotificationId}", notification.NotificationId);
             }
             else
@@ -194,7 +190,7 @@ namespace Oqtane.Controllers
                     notification.Body = WebUtility.HtmlEncode(notification.Body);
                 }
                 notification = _notifications.UpdateNotification(notification);
-                _syncManager.AddSyncEvent(_alias.TenantId, EntityNames.Notification, notification.NotificationId, SyncEventActions.Update);
+                _syncManager.AddSyncEvent(_alias, EntityNames.Notification, notification.NotificationId, SyncEventActions.Update);
                 _logger.Log(LogLevel.Information, this, LogFunction.Update, "Notification Updated {NotificationId}", notification.NotificationId);
             }
             else
@@ -215,7 +211,7 @@ namespace Oqtane.Controllers
             if (notification != null && notification.SiteId == _alias.SiteId && (IsAuthorized(notification.FromUserId) || IsAuthorized(notification.ToUserId)))
             {
                 _notifications.DeleteNotification(id);
-                _syncManager.AddSyncEvent(_alias.TenantId, EntityNames.Notification, notification.NotificationId, SyncEventActions.Delete);
+                _syncManager.AddSyncEvent(_alias, EntityNames.Notification, notification.NotificationId, SyncEventActions.Delete);
                 _logger.Log(LogLevel.Information, this, LogFunction.Delete, "Notification Deleted {NotificationId}", id);
             }
             else

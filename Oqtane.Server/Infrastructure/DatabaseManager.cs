@@ -1,10 +1,7 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.Loader;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -29,16 +26,14 @@ namespace Oqtane.Infrastructure
     {
         private readonly IConfigManager _config;
         private readonly IServiceScopeFactory _serviceScopeFactory;
-        private readonly IWebHostEnvironment _environment;
         private readonly IMemoryCache _cache;
         private readonly IConfigManager _configManager;
         private readonly ILogger<DatabaseManager> _filelogger;
 
-        public DatabaseManager(IConfigManager config, IServiceScopeFactory serviceScopeFactory, IWebHostEnvironment environment, IMemoryCache cache, IConfigManager configManager, ILogger<DatabaseManager> filelogger)
+        public DatabaseManager(IConfigManager config, IServiceScopeFactory serviceScopeFactory, IMemoryCache cache, IConfigManager configManager, ILogger<DatabaseManager> filelogger)
         {
             _config = config;
             _serviceScopeFactory = serviceScopeFactory;
-            _environment = environment;
             _cache = cache;
             _configManager = configManager;
             _filelogger = filelogger;
@@ -216,19 +211,27 @@ namespace Oqtane.Infrastructure
                     // get database type
                     var type = Type.GetType(databaseType);
 
-                    // create database object from type
-                    var database = Activator.CreateInstance(type) as IDatabase;
-
-                    // create data directory if does not exist
-                    var dataDirectory = AppDomain.CurrentDomain.GetData(Constants.DataDirectory)?.ToString();
-                    if (!Directory.Exists(dataDirectory)) Directory.CreateDirectory(dataDirectory ?? String.Empty);
-
-                    var dbOptions = new DbContextOptionsBuilder().UseOqtaneDatabase(database, NormalizeConnectionString(install.ConnectionString)).Options;
-                    using (var dbc = new DbContext(dbOptions))
+                    if (type != null)
                     {
-                        // create empty database if it does not exist
-                        dbc.Database.EnsureCreated();
-                        result.Success = true;
+                        // create database object from type
+                        var database = Activator.CreateInstance(type) as IDatabase;
+
+                        // create data directory if does not exist
+                        var dataDirectory = AppDomain.CurrentDomain.GetData(Constants.DataDirectory)?.ToString();
+                        if (!Directory.Exists(dataDirectory)) Directory.CreateDirectory(dataDirectory ?? String.Empty);
+
+                        var dbOptions = new DbContextOptionsBuilder().UseOqtaneDatabase(database, NormalizeConnectionString(install.ConnectionString)).Options;
+                        using (var dbc = new DbContext(dbOptions))
+                        {
+                            // create empty database if it does not exist
+                            dbc.Database.EnsureCreated();
+                            result.Success = true;
+                        }
+                    }
+                    else
+                    {
+                        result.Message = $"The Database Provider {databaseType} Does Not Exist. If This Is A Development Environment Please Ensure You Have Performed A Full Compilation Of All Projects In The Oqtane Solution Prior To Running The Application.";
+                        _filelogger.LogError(Utilities.LogMessage(this, result.Message));
                     }
                 }
                 catch (Exception ex)
@@ -449,7 +452,7 @@ namespace Oqtane.Infrastructure
                                             {
                                                 try
                                                 {
-                                                    if (moduleType.GetInterface("IInstallable") != null)
+                                                    if (moduleType.GetInterface(nameof(IInstallable)) != null)
                                                     {
                                                         tenantManager.SetTenant(tenant.TenantId);
                                                         var moduleObject = ActivatorUtilities.CreateInstance(scope.ServiceProvider, moduleType) as IInstallable;
@@ -536,6 +539,8 @@ namespace Oqtane.Infrastructure
                             var identityUserManager = scope.ServiceProvider.GetRequiredService<UserManager<IdentityUser>>();
 
                             var tenant = tenants.GetTenants().FirstOrDefault(item => item.Name == install.TenantName);
+                            var rendermode = (!string.IsNullOrEmpty(install.RenderMode)) ? install.RenderMode : _configManager.GetSection("RenderMode").Value;
+                            var runtime = (!string.IsNullOrEmpty(install.Runtime)) ? install.Runtime : _configManager.GetSection("Runtime").Value;
 
                             site = new Site
                             {
@@ -553,9 +558,10 @@ namespace Oqtane.Infrastructure
                                 DefaultContainerType = (!string.IsNullOrEmpty(install.DefaultContainer)) ? install.DefaultContainer : Constants.DefaultContainer,
                                 AdminContainerType = (!string.IsNullOrEmpty(install.DefaultAdminContainer)) ? install.DefaultAdminContainer : Constants.DefaultAdminContainer,
                                 SiteTemplateType = install.SiteTemplate,
-                                Runtime = (!string.IsNullOrEmpty(install.Runtime)) ? install.Runtime : _configManager.GetSection("Runtime").Value,
-                                RenderMode = (!string.IsNullOrEmpty(install.RenderMode)) ? install.RenderMode : _configManager.GetSection("RenderMode").Value,
-                                HybridEnabled = false
+                                RenderMode = rendermode,
+                                Runtime = runtime,
+                                Prerender = (rendermode == RenderModes.Interactive),
+                                Hybrid = false
                             };
                             site = sites.AddSite(site);
 

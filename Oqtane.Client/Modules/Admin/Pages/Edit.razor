@@ -1,10 +1,12 @@
 @namespace Oqtane.Modules.Admin.Pages
 @using Oqtane.Interfaces
+@using System.Globalization
 @inherits ModuleBase
 @inject NavigationManager NavigationManager
 @inject IPageService PageService
 @inject IPageModuleService PageModuleService
-@inject IThemeService  ThemeService
+@inject IModuleService ModuleService
+@inject IThemeService ThemeService
 @inject ISystemService SystemService
 @inject IStringLocalizer<Edit> Localizer
 @inject IStringLocalizer<SharedResources> SharedLocalizer
@@ -30,7 +32,7 @@
                                 <div class="col-sm-9">
                                         <select id="parent" class="form-select" value="@_parentid" @onchange="(e => ParentChanged(e))" required>
                                             <option value="-1">&lt;@Localizer["SiteRoot"]&gt;</option>
-                                            @foreach (Page page in PageState.Pages)
+                                            @foreach (Page page in _pages)
                                             {
                                                 if (UserSecurity.IsAuthorized(PageState.User, PermissionNames.View, page.PermissionList) && page.PageId != _pageId)
                                                 {
@@ -135,6 +137,18 @@
                             </div>
                         </div>
                         <div class="row mb-1 align-items-center">
+                            <Label Class="col-sm-3" For="effectiveDate" HelpText="The date that this page is active" ResourceKey="EffectiveDate">Effective Date: </Label>
+                            <div class="col-sm-9">
+                                <input type="date" id="effectiveDate" class="form-control" @bind="@_effectivedate" />
+                            </div>
+                        </div>
+                        <div class="row mb-1 align-items-center">
+                            <Label Class="col-sm-3" For="expiryDate" HelpText="The date that this page expires" ResourceKey="ExpiryDate">Expiry Date: </Label>
+                            <div class="col-sm-9">
+                                <input type="date" id="expiryDate" class="form-control" @bind="@_expirydate" />
+                            </div>
+                        </div>
+                        <div class="row mb-1 align-items-center">
                             <Label Class="col-sm-3" For="personalizable" HelpText="Select whether you would like users to be able to personalize this page with their own content" ResourceKey="Personalizable">Personalizable? </Label>
                             <div class="col-sm-9">
                                 <select id="personalizable" class="form-select" @bind="@_ispersonalizable" required>
@@ -158,7 +172,14 @@
                                     <select id="theme" class="form-select" value="@_themetype" @onchange="(e => ThemeChanged(e))" required>
                                         @foreach (var theme in _themes)
                                         {
-                                            <option value="@theme.TypeName">@theme.Name</option>
+                                            @if (theme.TypeName == PageState.Site.DefaultThemeType)
+                                            {
+                                                <option value="@theme.TypeName">*@theme.Name*</option>
+                                            }
+                                            else
+                                            {
+                                                <option value="@theme.TypeName">@theme.Name</option>
+                                            }
                                         }
                                     </select>
                                 </div>
@@ -167,9 +188,12 @@
                                 <Label Class="col-sm-3" For="container" HelpText="Select the default container for the page" ResourceKey="DefaultContainer">Default Container: </Label>
                                 <div class="col-sm-9">
                                     <select id="container" class="form-select" @bind="@_containertype" required>
-                                        @foreach (var container in _containers)
+                                        @if (_containers != null)
                                         {
-                                            <option value="@container.TypeName">@container.Name</option>
+                                            foreach (var container in _containers)
+                                            {
+                                                <option value="@container.TypeName">@container.Name</option>
+                                            }
                                         }
                                     </select>
                                 </div>
@@ -222,7 +246,7 @@
                 @if (_themeSettingsType != null)
                 {
                     <TabPanel Name="ThemeSettings" Heading="Theme Settings" ResourceKey="ThemeSettings">
-                        @ThemeSettingsComponent
+                        @_themeSettingsComponent
                     </TabPanel>
                     <br />
                 }
@@ -245,7 +269,14 @@
                                 <select id="theme" class="form-select" @bind="@_themetype" required>
                                     @foreach (var theme in _themes)
                                     {
-                                        <option value="@theme.TypeName">@theme.Name</option>
+                                        @if (theme.TypeName == PageState.Site.DefaultThemeType)
+                                        {
+                                            <option value="@theme.TypeName">*@theme.Name*</option>
+                                        }
+                                        else
+                                        {
+                                            <option value="@theme.TypeName">@theme.Name</option>
+                                        }
                                     }
                                 </select>
                             </div>
@@ -266,7 +297,7 @@
                 @if (_themeSettingsType != null)
                 {
                     <TabPanel Name="ThemeSettings" Heading="Theme Settings" ResourceKey="ThemeSettings">
-                        @ThemeSettingsComponent
+                        @_themeSettingsComponent
                     </TabPanel>
                     <br />
                 }
@@ -286,6 +317,7 @@
     private bool validated = false;
     private List<ThemeControl> _themes = new List<ThemeControl>();
     private List<ThemeControl> _containers = new List<ThemeControl>();
+    private List<Page> _pages;
     private int _pageId;
     private string _name;
     private string _currentparentid;
@@ -305,7 +337,7 @@
     private string _containertype = "-";
     private Type _themeSettingsType;
     private object _themeSettings;
-    private RenderFragment ThemeSettingsComponent { get; set; }
+    private RenderFragment _themeSettingsComponent { get; set; }
     private string _headcontent;
     private string _bodycontent;
     private List<Permission> _permissions = null;
@@ -322,11 +354,14 @@
     protected Page _parent = null;
     protected Dictionary<string, string> _icons;
     private string _iconresources = "";
+    private DateTime? _effectivedate = null;
+    private DateTime? _expirydate = null;
 
     protected override async Task OnInitializedAsync()
     {
         try
         {
+            _pages = await PageService.GetPagesAsync(PageState.Site.SiteId);
             _pageId = Int32.Parse(PageState.QueryString["id"]);
             _page = await PageService.GetPageAsync(_pageId);
             _icons = await SystemService.GetIconsAsync();
@@ -342,10 +377,10 @@
                 else
                 {
                     _parentid = _page.ParentId.ToString();
-                    _parent = PageState.Pages.FirstOrDefault(item => item.PageId == _page.ParentId);
+                    _parent = _pages.FirstOrDefault(item => item.PageId == _page.ParentId);
                 }
                 _children = new List<Page>();
-                foreach (Page p in PageState.Pages.Where(item => (_parentid == "-1" && item.ParentId == null) || (item.ParentId == int.Parse(_parentid))))
+                foreach (Page p in _pages.Where(item => (_parentid == "-1" && item.ParentId == null) || (item.ParentId == int.Parse(_parentid, CultureInfo.InvariantCulture))))
                 {
                     if (p.PageId != _pageId && UserSecurity.IsAuthorized(PageState.User, PermissionNames.View, p.PermissionList))
                     {
@@ -370,6 +405,8 @@
                 }
                 _url = _page.Url;
                 _icon = _page.Icon;
+                _effectivedate = Utilities.UtcAsLocalDate(_page.EffectiveDate);
+                _expirydate = Utilities.UtcAsLocalDate(_page.ExpiryDate);
                 _ispersonalizable = _page.IsPersonalizable.ToString();
 
                 // appearance
@@ -395,7 +432,8 @@
                 _permissions = _page.PermissionList;
 
                 // page modules
-                _pageModules = PageState.Modules.Where(m => m.PageId == _page.PageId).ToList();
+                var modules = await ModuleService.GetModulesAsync(PageState.Site.SiteId);
+                _pageModules = modules.Where(item => item.PageId == _page.PageId && !item.IsDeleted).ToList();
 
                 // audit
                 _createdby = _page.CreatedBy;
@@ -427,8 +465,8 @@
         {
             _parentid = (string)e.Value;
             _children = new List<Page>();
-            foreach (Page p in PageState.Pages.Where(item => (_parentid == "-1" && item.ParentId == null) || (item.ParentId == int.Parse(_parentid))))
-            {
+            foreach (Page p in _pages.Where(item => (_parentid == "-1" && item.ParentId == null) || (item.ParentId == int.Parse(_parentid))))
+        {
                 if (p.PageId != _pageId && UserSecurity.IsAuthorized(PageState.User, PermissionNames.View, p.PermissionList))
                 {
                     _children.Add(p);
@@ -451,7 +489,7 @@
         _containertype = _containers.First().TypeName;
         ThemeSettings();
         StateHasChanged();
-        
+
         // if theme chosen is different than default site theme, display warning message to user
         if (ThemeService.GetTheme(PageState.Site.Themes, _themetype)?.ThemeName != ThemeService.GetTheme(PageState.Site.Themes, PageState.Site.DefaultThemeType)?.ThemeName)
         {
@@ -462,16 +500,19 @@
     private void ThemeSettings()
     {
         _themeSettingsType = null;
+        _themeSettingsComponent = null;
         var theme = PageState.Site.Themes.FirstOrDefault(item => item.Themes.Any(themecontrol => themecontrol.TypeName.Equals(_themetype)));
         if (theme != null && !string.IsNullOrEmpty(theme.ThemeSettingsType))
         {
             _themeSettingsType = Type.GetType(theme.ThemeSettingsType);
             if (_themeSettingsType != null)
             {
-                ThemeSettingsComponent = builder =>
+                _themeSettingsComponent = builder =>
                 {
                     builder.OpenComponent(0, _themeSettingsType);
-                    builder.AddComponentReferenceCapture(1, inst => { _themeSettings = Convert.ChangeType(inst, _themeSettingsType); });
+                    builder.AddAttribute(1, "RenderModeBoundary", RenderModeBoundary);
+                    builder.AddComponentReferenceCapture(2, inst => { _themeSettings = Convert.ChangeType(inst, _themeSettingsType); });
+                    
                     builder.CloseComponent();
                 };
             }
@@ -487,16 +528,31 @@
         {
             try
             {
+                if (!Utilities.ValidateEffectiveExpiryDates(_effectivedate, _expirydate))
+                {
+                    AddModuleMessage(SharedLocalizer["Message.EffectiveExpiryDateError"], MessageType.Warning);
+                    return;
+                }
                 if (!string.IsNullOrEmpty(_themetype) && _containertype != "-")
                 {
                     string currentPath = _page.Path;
 
                     _page.Name = _name;
 
+                    if (_parentid == "-1")
+                    {
+                        _page.ParentId = null;
+                    }
+                    else
+                    {
+                        _page.ParentId = Int32.Parse(_parentid);
+                    }
+
                     if (string.IsNullOrEmpty(_path))
                     {
                         _path = _name;
                     }
+
                     if (_path.Contains("/"))
                     {
                         if (_path.EndsWith("/") && _path != "/")
@@ -505,16 +561,13 @@
                         }
                         _path = _path.Substring(_path.LastIndexOf("/") + 1);
                     }
-
                     if (_parentid == "-1")
                     {
-                        _page.ParentId = null;
                         _page.Path = Utilities.GetFriendlyUrl(_path);
                     }
                     else
                     {
-                        _page.ParentId = Int32.Parse(_parentid);
-                        Page parent = PageState.Pages.FirstOrDefault(item => item.PageId == _page.ParentId);
+                        Page parent = _pages.FirstOrDefault(item => item.PageId == _page.ParentId);
                         if (parent.Path == string.Empty)
                         {
                             _page.Path = Utilities.GetFriendlyUrl(parent.Name) + "/" + Utilities.GetFriendlyUrl(_path);
@@ -525,7 +578,6 @@
                         }
                     }
 
-                    var _pages = await PageService.GetPagesAsync(PageState.Site.SiteId);
                     if (_pages.Any(item => item.Path == _page.Path && item.PageId != _page.PageId))
                     {
                         AddModuleMessage(string.Format(Localizer["Mesage.Page.PathExists"], _path), MessageType.Warning);
@@ -547,11 +599,11 @@
                                 _page.Order = 0;
                                 break;
                             case "<":
-                                child = PageState.Pages.FirstOrDefault(item => item.PageId == _childid);
+                                child = _pages.FirstOrDefault(item => item.PageId == _childid);
                                 if (child != null) _page.Order = child.Order - 1;
                                 break;
                             case ">":
-                                child = PageState.Pages.FirstOrDefault(item => item.PageId == _childid);
+                                child = _pages.FirstOrDefault(item => item.PageId == _childid);
                                 if (child != null) _page.Order = child.Order + 1;
                                 break;
                             case ">>":
@@ -563,6 +615,8 @@
                     _page.IsClickable = (_isclickable == null ? true : Boolean.Parse(_isclickable));
                     _page.Url = _url;
                     _page.Icon = _icon ?? string.Empty;
+                    _page.EffectiveDate = Utilities.LocalDateAndTimeAsUtc(_effectivedate);
+                    _page.ExpiryDate = Utilities.LocalDateAndTimeAsUtc(_expirydate);
                     _page.IsPersonalizable = (_ispersonalizable != null && Boolean.Parse(_ispersonalizable));
 
                     // appearance
@@ -607,11 +661,11 @@
                     await logger.LogInformation("Page Saved {Page}", _page);
                     if (!string.IsNullOrEmpty(PageState.ReturnUrl))
                     {
-                        NavigationManager.NavigateTo(PageState.ReturnUrl);
+                        NavigationManager.NavigateTo(PageState.ReturnUrl, true); // redirect to page being edited and reload
                     }
                     else
                     {
-                        NavigationManager.NavigateTo(NavigateUrl());
+                        NavigationManager.NavigateTo(NavigateUrl()); // redirect to page management
                     }
                 }
                 else
